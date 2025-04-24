@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>石头剪刀布手势游戏</title>
+    <title>石头剪刀布手势游戏 - 优化版</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose"></script>
     <style>
@@ -16,31 +16,33 @@
             padding: 20px;
         }
         #game-container {
-            position: relative; /* Crucial for absolute positioning of children */
-            width: 640px; /* Match video/canvas size */
-            height: 480px; /* Match video/canvas size */
+            position: relative;
+            width: 640px;
+            height: 480px;
             margin: 20px 0;
-            overflow: hidden; /* Hide anything outside the container */
-            background-color: #000; /* Black background if video isn't ready */
+            overflow: hidden;
+            background-color: #000;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
         }
         #video, #canvas {
             position: absolute;
             top: 0;
             left: 0;
-            width: 100%; /* Make them fill the container */
-            height: 100%; /* Make them fill the container */
+            width: 100%;
+            height: 100%;
         }
         #video {
-            transform: scaleX(-1); /* Flip video horizontally */
-            z-index: 1; /* Behind hand landmarks and overlays */
+            transform: scaleX(-1);
+            z-index: 1;
         }
         #canvas {
-            z-index: 2; /* On top of video for drawing landmarks */
+            z-index: 2;
         }
-
         #score {
             font-size: 24px;
             margin: 10px 0;
+            font-weight: bold;
         }
         #countdown {
             font-size: 48px;
@@ -51,12 +53,12 @@
             left: 50%;
             transform: translate(-50%, -50%);
             display: none;
-            z-index: 10; /* On top of everything */
-            background-color: rgba(255, 255, 255, 0.8); /* Add a background for readability */
+            z-index: 10;
+            background-color: rgba(255, 255, 255, 0.8);
             padding: 10px 20px;
             border-radius: 10px;
         }
-         #result {
+        #result {
             font-size: 32px;
             margin: 10px 0;
             min-height: 40px;
@@ -71,27 +73,54 @@
             border-radius: 5px;
             cursor: pointer;
             margin-top: 10px;
+            transition: background-color 0.3s;
         }
         #start-btn:hover {
             background-color: #45a049;
         }
+        #start-btn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
         .computer-choice {
-            width: 150px; /* Increase size for better visibility */
+            width: 150px;
             height: 150px;
-            display: none; /* Initially hidden */
-            position: absolute; /* Position inside #game-container */
-            top: 50%; /* Center vertically */
-            left: 50%; /* Center horizontally */
-            transform: translate(-50%, -50%); /* Adjust for image's own size */
-            z-index: 5; /* On top of video/canvas, below countdown */
-            background-color: rgba(255, 255, 255, 0.8); /* Add a background */
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 5;
+            background-color: rgba(255, 255, 255, 0.8);
             border-radius: 10px;
             padding: 10px;
+        }
+        #gesture-indicator {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 16px;
+            z-index: 5;
+        }
+        #fps-counter {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            z-index: 5;
         }
     </style>
 </head>
 <body>
-    <h1>石头剪刀布手势游戏</h1>
+    <h1>石头剪刀布手势游戏 - 优化版</h1>
     <div id="score">玩家: 0 - 电脑: 0</div>
     <div id="result"></div>
     
@@ -99,6 +128,8 @@
         <video id="video" width="640" height="480" autoplay muted playsinline></video>
         <canvas id="canvas" width="640" height="480"></canvas>
         <div id="countdown"></div>
+        <div id="gesture-indicator">当前手势: 未检测</div>
+        <div id="fps-counter">FPS: 0</div>
         
         <img id="rock-img" class="computer-choice" src="rock-200x187.png" alt="石头">
         <img id="paper-img" class="computer-choice" src="paper-200x187.png" alt="布">
@@ -108,18 +139,25 @@
     <button id="start-btn">开始游戏</button>
 
     <script>
-        // Game State
+        // 游戏状态
         let gameState = 'idle'; // 'idle', 'countdown', 'playing', 'result'
-
-        // Game Variables
+        
+        // 游戏变量
         let playerScore = 0;
         let computerScore = 0;
         let countdownInterval;
-        let detectionInterval; // Interval for hand detection
         let handposeModel;
-        let latestHand = null; // To store the result of the latest detection
-
-        // DOM Elements
+        let latestHand = null;
+        let lastDetectionTime = 0;
+        let detectionFPS = 0;
+        let renderFPS = 0;
+        let lastFrameTime = 0;
+        let currentGesture = null;
+        
+        // 启用WebGL加速
+        tf.setBackend('webgl');
+        
+        // DOM 元素
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -130,23 +168,22 @@
         const rockImg = document.getElementById('rock-img');
         const paperImg = document.getElementById('paper-img');
         const scissorsImg = document.getElementById('scissors-img');
+        const gestureIndicator = document.getElementById('gesture-indicator');
+        const fpsCounter = document.getElementById('fps-counter');
         
-        // Add playsinline to video for better mobile compatibility
-        video.setAttribute('playsinline', true);
-
-        // Initialize Camera
+        // 初始化摄像头 - 优化为更高帧率
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: {
-                         width: { ideal: 640 },
-                         height: { ideal: 480 }
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        frameRate: { ideal: 30 }  // 请求更高帧率
                     }
                 });
                 video.srcObject = stream;
                 return new Promise((resolve, reject) => {
                     video.onloadedmetadata = () => {
-                        // Set canvas and container size to match video after metadata loads
                         canvas.width = video.videoWidth;
                         canvas.height = video.videoHeight;
                         const gameContainer = document.getElementById('game-container');
@@ -154,7 +191,7 @@
                         gameContainer.style.height = video.videoHeight + 'px';
                         resolve();
                     };
-                     video.onerror = (err) => {
+                    video.onerror = (err) => {
                         console.error("Video error:", err);
                         reject("Video error");
                     };
@@ -166,12 +203,16 @@
             }
         }
         
-        // Load Handpose Model
+        // 加载 Handpose 模型 - 优化为使用轻量级模型
         async function loadHandposeModel() {
             try {
-                // Load 'lite' model for better performance
                 console.log("正在加载手部检测模型...");
-                handposeModel = await handpose.load({ architecture: 'lite' });
+                // 使用 lite 模型提高性能
+                handposeModel = await handpose.load({ 
+                    architecture: 'lite',
+                    detectionConfidence: 0.7,  // 提高置信度阈值，减少错误检测
+                    maxNumHands: 1  // 仅检测一只手，减少计算量
+                });
                 console.log("手部检测模型加载完成");
                 return handposeModel;
             } catch (err) {
@@ -181,116 +222,166 @@
             }
         }
         
-        // Perform Hand Detection (Runs periodically)
+        // 优化的手部检测函数 - 使用 requestAnimationFrame 进行检测
         async function detectHand() {
-            if (!handposeModel || !video.videoWidth || !video.videoHeight) {
-                latestHand = null;
-                return; // Ensure video and model are ready
+            if (!handposeModel || !video.videoWidth || gameState === 'idle') {
+                requestAnimationFrame(detectHand);
+                return;
             }
+            
+            // 计算检测间隔和 FPS
+            const now = performance.now();
+            const detectionInterval = now - lastDetectionTime;
             
             try {
                 const predictions = await handposeModel.estimateHands(video);
+                
+                // 更新 FPS 计数器
+                lastDetectionTime = performance.now();
+                detectionFPS = 1000 / detectionInterval;
+                
                 if (predictions && predictions.length > 0) {
-                    latestHand = predictions[0]; // Store the latest detected hand
+                    latestHand = predictions[0];
+                    const gesture = determineGesture(latestHand);
+                    currentGesture = gesture;
+                    
+                    // 更新手势指示器
+                    if (gameState === 'playing' || gameState === 'countdown') {
+                        updateGestureIndicator(gesture);
+                    }
                 } else {
-                    latestHand = null; // No hand detected
+                    if (gameState === 'playing' || gameState === 'countdown') {
+                        gestureIndicator.textContent = "当前手势: 未检测";
+                    }
+                    currentGesture = null;
+                    latestHand = null;
                 }
             } catch (err) {
-                 console.error("手部检测失败:", err);
-                 latestHand = null; // Clear hand on error
+                console.error("手部检测失败:", err);
+                currentGesture = null;
+                latestHand = null;
+            }
+            
+            // 连续检测
+            if (gameState !== 'idle') {
+                requestAnimationFrame(detectHand);
             }
         }
-
-        // Start the periodic hand detection loop
-        function startDetectionLoop(interval = 100) { // Run detection roughly every 100ms (10 FPS)
-             if (detectionInterval) clearInterval(detectionInterval);
-             detectionInterval = setInterval(detectHand, interval);
-             console.log("手部检测循环启动");
-        }
-
-        // Stop the hand detection loop
-        function stopDetectionLoop() {
-             if (detectionInterval) {
-                 clearInterval(detectionInterval);
-                 detectionInterval = null;
-                 latestHand = null; // Clear stored hand data
-                 console.log("手部检测循环停止");
-             }
+        
+        // 更新手势指示器
+        function updateGestureIndicator(gesture) {
+            const gestureNames = {
+                'rock': '石头',
+                'paper': '布',
+                'scissors': '剪刀'
+            };
+            
+            if (gesture) {
+                gestureIndicator.textContent = `当前手势: ${gestureNames[gesture] || '未知'}`;
+            } else {
+                gestureIndicator.textContent = "当前手势: 未检测";
+            }
         }
         
-        // Determine Gesture from Hand Landmarks (Simplified)
+        // 优化的手势识别算法
         function determineGesture(hand) {
-             // This is a simplified implementation based on finger counting.
-             // For better accuracy, consider checking relative positions of landmarks
-             // (e.g., tip vs. base of fingers, distance between fingers).
-             const fingersUp = countFingersUp(hand);
-
-             // Handpose specific landmark indices:
-             // 0: Wrist
-             // 1-4: Thumb (base to tip)
-             // 5-8: Index finger (base to tip)
-             // 9-12: Middle finger (base to tip)
-             // 13-16: Ring finger (base to tip)
-             // 17-20: Pinky finger (base to tip)
-
-             // Simplified logic:
-             // Rock: Usually 0 fingers up (clenched fist)
-             // Scissors: Index and Middle fingers up (2 fingers)
-             // Paper: All 4 fingers up (or 3 depending on thumb)
-
-            if (fingersUp === 0) { // Likely a fist
-                 return 'rock'; // Assume 0 fingers up is rock
-             } else if (fingersUp === 2) { // Likely scissors
-                 return 'scissors';
-             } else if (fingersUp >= 3) { // Likely paper (3 or 4 fingers up)
-                  return 'paper';
-             }
-
-             // If none of the above, return null or a default
-             return null;
-         }
-
-         // Calculate the number of fingers that are likely "up" (Simplified)
-         function countFingersUp(hand) {
-             const landmarks = hand.landmarks;
-             let fingersUp = 0;
-
-             // Handpose landmark indices for finger tips and their bases (MCP - Metacarpophalangeal joint)
-             const fingerTips = [8, 12, 16, 20]; // Index, Middle, Ring, Pinky tips
-             const fingerBases = [5, 9, 13, 17]; // Index, Middle, Ring, Pinky bases
-
-             // Thumb check (more complex, often involves comparing to wrist or index finger base)
-             // Skipping for this basic implementation.
-
-             // Check if non-thumb finger tips are significantly higher (smaller y-value) than their bases
-             for (let i = 0; i < fingerTips.length; i++) {
-                 const tip = landmarks[fingerTips[i]];
-                 const base = landmarks[fingerBases[i]];
-
-                 // Inverted y-axis in screen coordinates: smaller y means higher on the screen
-                 // Check if the tip is notably higher than the base
-                 // Adding a tolerance based on overall hand size might improve robustness
-                 const handHeight = landmarks[0][1] - Math.min(landmarks[8][1], landmarks[12][1], landmarks[16][1], landmarks[20][1]);
-                 const yThreshold = handHeight * 0.1; // e.g., 10% of hand height above base
-
-                 if (tip[1] < base[1] - yThreshold) {
-                     fingersUp++;
-                 }
-             }
-
-             return fingersUp;
-         }
-
-        // Computer random choice
+            const landmarks = hand.landmarks;
+            
+            // 计算手掌中心(使用手腕和所有指关节的平均位置)
+            const palmBase = landmarks[0]; // 手腕
+            
+            // 指尖点
+            const thumbTip = landmarks[4];
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+            const ringTip = landmarks[16];
+            const pinkyTip = landmarks[20];
+            
+            // 指关节点
+            const thumbIp = landmarks[3];  // 拇指关节
+            const indexPip = landmarks[6]; // 食指第二关节
+            const middlePip = landmarks[10]; // 中指第二关节
+            const ringPip = landmarks[14];  // 无名指第二关节
+            const pinkyPip = landmarks[18]; // 小指第二关节
+            
+            // 手指基部点
+            const indexMcp = landmarks[5];  // 食指基部
+            const middleMcp = landmarks[9]; // 中指基部
+            const ringMcp = landmarks[13];  // 无名指基部
+            const pinkyMcp = landmarks[17]; // 小指基部
+            
+            // 计算每个指尖与关节的距离
+            const distThumbTipJoint = distance3D(thumbTip, thumbIp);
+            const distIndexTipJoint = distance3D(indexTip, indexPip);
+            const distMiddleTipJoint = distance3D(middleTip, middlePip);
+            const distRingTipJoint = distance3D(ringTip, ringPip);
+            const distPinkyTipJoint = distance3D(pinkyTip, pinkyPip);
+            
+            // 计算手指是否伸展 - 指尖到基部的距离
+            const indexExtension = distance3D(indexTip, indexMcp);
+            const middleExtension = distance3D(middleTip, middleMcp);
+            const ringExtension = distance3D(ringTip, ringMcp);
+            const pinkyExtension = distance3D(pinkyTip, pinkyMcp);
+            
+            // 计算手掌大小作为参考比例
+            const palmSize = distance3D(landmarks[0], landmarks[9]);
+            
+            // 归一化阈值 - 根据手掌大小调整
+            const extensionThreshold = palmSize * 0.5;
+            const bendThreshold = palmSize * 0.15;
+            
+            // 判断每个手指是否伸展
+            const isIndexExtended = indexExtension > extensionThreshold && distIndexTipJoint > bendThreshold;
+            const isMiddleExtended = middleExtension > extensionThreshold && distMiddleTipJoint > bendThreshold;
+            const isRingExtended = ringExtension > extensionThreshold && distRingTipJoint > bendThreshold;
+            const isPinkyExtended = pinkyExtension > extensionThreshold && distPinkyTipJoint > bendThreshold;
+            
+            // 计算伸展的手指数量
+            const extendedFingers = [isIndexExtended, isMiddleExtended, isRingExtended, isPinkyExtended]
+                .filter(Boolean).length;
+            
+            // 剪刀特征：食指和中指伸展，其他收缩
+            if (isIndexExtended && isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+                // 额外检查：食指和中指应该分开
+                const indexMiddleDistance = distance3D(indexTip, middleTip);
+                if (indexMiddleDistance > palmSize * 0.2) {
+                    return 'scissors';
+                }
+            }
+            
+            // 石头特征：所有手指都弯曲
+            if (extendedFingers === 0) {
+                return 'rock';
+            }
+            
+            // 布特征：大部分手指伸展
+            if (extendedFingers >= 3) {
+                return 'paper';
+            }
+            
+            // 如果无法确定，返回null
+            return null;
+        }
+        
+        // 计算3D距离
+        function distance3D(a, b) {
+            return Math.sqrt(
+                Math.pow(a[0] - b[0], 2) + 
+                Math.pow(a[1] - b[1], 2) + 
+                Math.pow(a[2] - b[2], 2)
+            );
+        }
+        
+        // 电脑随机选择
         function computerChoice() {
             const choices = ['rock', 'paper', 'scissors'];
             const randomIndex = Math.floor(Math.random() * choices.length);
             return choices[randomIndex];
         }
         
-        // Show computer's choice image
+        // 显示电脑选择的图像
         function showComputerChoice(choice) {
-            hideComputerChoices(); // Hide all first
+            hideComputerChoices();
             
             if (choice === 'rock') {
                 rockImg.style.display = 'block';
@@ -300,18 +391,18 @@
                 scissorsImg.style.display = 'block';
             }
         }
-
-        // Hide all computer choice images
+        
+        // 隐藏所有电脑选择图像
         function hideComputerChoices() {
             rockImg.style.display = 'none';
             paperImg.style.display = 'none';
             scissorsImg.style.display = 'none';
         }
         
-        // Determine the winner
+        // 判定胜负
         function determineWinner(player, computer) {
-            if (player === null) return 'none'; // Special case for no player gesture
-
+            if (player === null) return 'none';
+            
             if (player === computer) {
                 return 'draw';
             }
@@ -327,12 +418,12 @@
             return 'computer';
         }
         
-        // Update score display
+        // 更新分数显示
         function updateScore() {
             scoreElement.textContent = `玩家: ${playerScore} - 电脑: ${computerScore}`;
         }
         
-        // Display round result
+        // 显示回合结果
         function showResult(playerChoice, computerChoice, winner) {
             const choiceNames = {
                 'rock': '石头',
@@ -341,14 +432,14 @@
             };
             
             let resultText = '';
-
+            
             if (winner === 'none') {
-                 resultText = '未检测到有效手势，本轮跳过。';
-                 hideComputerChoices(); // Ensure computer choice is hidden if no hand
+                resultText = '未检测到有效手势，本轮跳过。';
+                hideComputerChoices();
             } else {
                 resultText = `你出 ${playerChoice ? choiceNames[playerChoice] : '未知手势'}<br>`;
                 if (winner === 'player') {
-                    resultText += '你赢了!';
+                    resultText += `电脑出 ${choiceNames[computerChoice]}，你赢了!`;
                     playerScore++;
                 } else if (winner === 'computer') {
                     resultText += `电脑出 ${choiceNames[computerChoice]}，电脑赢了!`;
@@ -356,23 +447,24 @@
                 } else { // draw
                     resultText += `电脑出 ${choiceNames[computerChoice]}，平局!`;
                 }
-                 showComputerChoice(computerChoice); // Show computer choice only if a comparison happened
+                showComputerChoice(computerChoice);
             }
-
+            
             resultElement.innerHTML = resultText;
             updateScore();
         }
         
-        // Start the countdown
+        // 开始倒计时
         function startCountdown() {
             gameState = 'countdown';
             let count = 3;
             countdownElement.style.display = 'block';
             countdownElement.textContent = count;
             
-            hideComputerChoices(); // Hide computer choice images
-            resultElement.textContent = ''; // Clear previous result text
-
+            hideComputerChoices();
+            resultElement.textContent = '';
+            gestureIndicator.textContent = "当前手势: 未检测";
+            
             countdownInterval = setInterval(() => {
                 count--;
                 countdownElement.textContent = count;
@@ -380,162 +472,241 @@
                 if (count <= 0) {
                     clearInterval(countdownInterval);
                     countdownElement.style.display = 'none';
-                    playRound(); // Start the game round after countdown
+                    playRound();
                 }
             }, 1000);
         }
         
-        // Game round logic
+        // 游戏回合逻辑
         async function playRound() {
-            gameState = 'playing'; // Transition to playing state - detection loop is now active
+            gameState = 'playing';
             console.log("playRound: 正在等待手势...");
-
-            // Wait for a valid hand gesture for a limited time
-            const maxWaitTime = 3000; // Wait up to 3 seconds for a hand
-            const startTime = Date.now();
-            let detectedHand = null;
-
-            // The detectionLoop is running in the background and updating latestHand
-            // We just need to wait here until latestHand is not null or timeout
-            while (Date.now() - startTime < maxWaitTime) {
-                 if (latestHand) {
-                     detectedHand = latestHand; // Got a hand!
-                     console.log("playRound: 手势检测成功.");
-                     break;
-                 }
-                 await new Promise(resolve => setTimeout(resolve, 50)); // Wait a short moment before checking latestHand again
-            }
-
-            stopDetectionLoop(); // Stop detection after the attempt
             
-            let playerChoice = null;
-            if (detectedHand) {
-                 playerChoice = determineGesture(detectedHand);
-                 console.log("playRound: 判定手势:", playerChoice);
-            } else {
-                 console.log("playRound: 未能在规定时间内检测到手势.");
-            }
-
-            const computer = computerChoice();
-            const winner = determineWinner(playerChoice, computer);
-
-            showResult(playerChoice, computer, winner);
-
-            // Wait for result display duration
-            const resultDisplayDuration = 3000; // milliseconds (e.g., 3 seconds)
-
-            setTimeout(() => {
-                if (gameState !== 'idle') { // Check if the game hasn't been stopped
-                    // Prepare for the next round
-                    gameState = 'countdown'; // Transition to countdown state
-                    resultElement.innerHTML = '准备下一轮...';
-                    // Start the countdown for the next round after a short pause
-                    setTimeout(startCountdown, 1000);
+            // 提高实时性：减少等待时间，让玩家准备好自己的手势
+            const maxWaitTime = 2000; // 减少到2秒
+            const startTime = Date.now();
+            let finalPlayerChoice = null;
+            
+            // 等待玩家手势或超时
+            while (Date.now() - startTime < maxWaitTime) {
+                if (currentGesture) {
+                    finalPlayerChoice = currentGesture;
+                    // 一旦检测到手势，额外等待短暂时间确保稳定
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                    // 再次检查，如果手势发生变化，使用最新的
+                    if (currentGesture) {
+                        finalPlayerChoice = currentGesture;
+                    }
+                    console.log("playRound: 手势检测成功:", finalPlayerChoice);
+                    break;
                 }
-                // If gameState is idle, the start button is already enabled by stopGame
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            
+            // 继续游戏流程
+            const computer = computerChoice();
+            const winner = determineWinner(finalPlayerChoice, computer);
+            
+            showResult(finalPlayerChoice, computer, winner);
+            
+            // 等待结果显示
+            const resultDisplayDuration = 2500; // 减少时间以提高实时性
+            
+            setTimeout(() => {
+                if (gameState !== 'idle') {
+                    gameState = 'countdown';
+                    resultElement.innerHTML = '准备下一轮...';
+                    setTimeout(startCountdown, 800); // 减少等待时间
+                }
             }, resultDisplayDuration);
-
-            // Start the detection loop now that we are in the 'playing' state
-            // This needs to be started BEFORE the waiting loop, or the waiting loop won't ever find a hand.
-            // Let's move startDetectionLoop call earlier.
-            // Correction: startDetectionLoop is called when game state transitions TO 'playing'.
-            // The state transition happens *inside* playRound now.
-            // Let's move startDetectionLoop to be called right before the while loop.
-            startDetectionLoop(); // Start detection while waiting
         }
         
-        // Start the game
+        // 开始游戏
         async function startGame() {
-            if (gameState !== 'idle') return; // Only start if idle
+            if (gameState !== 'idle') return;
             
-            // Reset scores for a new game
             playerScore = 0;
             computerScore = 0;
             updateScore();
-
-            // gameActive = true; // Replaced by gameState
+            
             startButton.disabled = true;
             resultElement.textContent = '游戏开始! 准备...';
             
-            hideComputerChoices(); // Hide computer choices initially
-
-            // Start the first countdown after a short delay
-            setTimeout(startCountdown, 1000);
-        }
-
-         // Stop the entire game
-         function stopGame() {
-             gameState = 'idle';
-             stopDetectionLoop(); // Stop detection loop
-             if (countdownInterval) clearInterval(countdownInterval); // Stop countdown
-             countdownElement.style.display = 'none'; // Hide countdown
-             hideComputerChoices(); // Hide computer choices
-             resultElement.textContent = '游戏已停止。'; // Update result text
-             startButton.disabled = false; // Enable start button
-             console.log("游戏停止");
-         }
-
-
-        // Draw hand landmarks (Runs on animation frame)
-        function drawHand(hand) {
-            ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear canvas each frame
-            if (!hand) return;
-
-            const landmarks = hand.landmarks;
-
-            // Draw points
-            ctx.fillStyle = 'red';
-            for (let i = 0; i < landmarks.length; i++) {
-                const [x, y, z] = landmarks[i]; // z is also available but not used for 2D drawing
-                ctx.beginPath();
-                // Flip x coordinate because video is flipped horizontally
-                ctx.arc(canvas.width - x, y, 5, 0, 2 * Math.PI); // Use radius 5
-                ctx.fill();
-            }
-
-            // Optionally draw connections between points (more complex, omitted for simplicity)
-            // See handpose examples for drawing lines connecting landmarks.
+            hideComputerChoices();
+            
+            // 开始手势检测
+            requestAnimationFrame(detectHand);
+            
+            // 开始第一轮倒计时
+            setTimeout(startCountdown, 800);
         }
         
-        // Animation loop for drawing hand landmarks (Runs constantly but only draws if latestHand is available)
-        function drawLoop() {
-             // Draw the latest stored hand landmarks if they exist
-             // Check if the game state requires drawing hand landmarks (e.g., playing or during countdown/result if you want to see the last pose)
-             // Let's draw only during playing state for clarity, or perhaps during countdown too
-            if (gameState === 'playing' || gameState === 'countdown') {
-                 drawHand(latestHand); // Draw the latest stored hand
-            } else {
-                 // Clear canvas when game is not active and no countdown/result is showing
-                 ctx.clearRect(0, 0, canvas.width, canvas.height);
-            }
-            requestAnimationFrame(drawLoop); // Schedule the next frame
+        // 停止游戏
+        function stopGame() {
+            gameState = 'idle';
+            if (countdownInterval) clearInterval(countdownInterval);
+            countdownElement.style.display = 'none';
+            hideComputerChoices();
+            resultElement.textContent = '游戏已停止。';
+            startButton.disabled = false;
+            gestureIndicator.textContent = "当前手势: 未检测";
+            console.log("游戏停止");
         }
-
-
-        // Initialize Game
+        
+        // 绘制手部标记 - 优化绘图效果
+        function drawHand(hand) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!hand) return;
+            
+            const landmarks = hand.landmarks;
+            
+            // 连接手指关节的线
+            const connections = [
+                // 拇指连接
+                [0, 1], [1, 2], [2, 3], [3, 4],
+                // 食指连接
+                [0, 5], [5, 6], [6, 7], [7, 8],
+                // 中指连接
+                [0, 9], [9, 10], [10, 11], [11, 12],
+                // 无名指连接
+                [0, 13], [13, 14], [14, 15], [15, 16],
+                // 小指连接
+                [0, 17], [17, 18], [18, 19], [19, 20],
+                // 手掌连接
+                [5, 9], [9, 13], [13, 17]
+            ];
+            
+            // 绘制连接线
+            ctx.strokeStyle = 'rgba(0, 255, 0, 0.8)';
+            ctx.lineWidth = 3;
+            
+            for (const [i, j] of connections) {
+                ctx.beginPath();
+                // 翻转x坐标以匹配镜像视频
+                ctx.moveTo(canvas.width - landmarks[i][0], landmarks[i][1]);
+                ctx.lineTo(canvas.width - landmarks[j][0], landmarks[j][1]);
+                ctx.stroke();
+            }
+            
+            // 绘制关节点
+            const jointColors = {
+                thumb: 'rgba(255, 0, 0, 0.8)', // 红色
+                index: 'rgba(0, 255, 0, 0.8)', // 绿色
+                middle: 'rgba(0, 0, 255, 0.8)', // 蓝色
+                ring: 'rgba(255, 255, 0, 0.8)', // 黄色
+                pinky: 'rgba(255, 0, 255, 0.8)' // 紫色
+            };
+            
+            // 为不同手指设置不同颜色
+            for (let i = 0; i < landmarks.length; i++) {
+                const [x, y] = landmarks[i];
+                ctx.beginPath();
+                
+                // 确定点的颜色
+                if (i >= 1 && i <= 4) {
+                    ctx.fillStyle = jointColors.thumb;
+                } else if (i >= 5 && i <= 8) {
+                    ctx.fillStyle = jointColors.index;
+                } else if (i >= 9 && i <= 12) {
+                    ctx.fillStyle = jointColors.middle;
+                } else if (i >= 13 && i <= 16) {
+                    ctx.fillStyle = jointColors.ring;
+                } else if (i >= 17 && i <= 20) {
+                    ctx.fillStyle = jointColors.pinky;
+                } else {
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                }
+                
+                // 指尖点更大
+                const radius = (i % 4 === 0 && i > 0) ? 6 : 4;
+                
+                // 翻转x坐标以匹配镜像视频
+                ctx.arc(canvas.width - x, y, radius, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+            
+            // 绘制当前检测到的手势
+            if (currentGesture) {
+                const gestureNames = {
+                    'rock': '石头',
+                    'paper': '布',
+                    'scissors': '剪刀'
+                };
+                
+                ctx.font = '24px Arial';
+                ctx.fillStyle = 'white';
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 2;
+                const text = gestureNames[currentGesture] || '未知手势';
+                
+                // 文本位置 - 手腕附近
+                const wristX = canvas.width - landmarks[0][0];
+                const wristY = landmarks[0][1] - 30;
+                
+                ctx.strokeText(text, wristX, wristY);
+                ctx.fillText(text, wristX, wristY);
+            }
+        }
+        
+        // 帧率计数和显示
+        function updateFPSCounter() {
+            const now = performance.now();
+            const elapsed = now - lastFrameTime;
+            
+            if (elapsed > 1000) { // 每秒更新一次
+                renderFPS = Math.round((1000 / (elapsed / frameCount)) * 10) / 10;
+                const detectionFPSRounded = Math.round(detectionFPS * 10) / 10;
+                
+                fpsCounter.textContent = `渲染: ${renderFPS} FPS | 检测: ${detectionFPSRounded} FPS`;
+                
+                lastFrameTime = now;
+                frameCount = 0;
+            }
+            
+            frameCount++;
+        }
+        
+        // 优化的渲染循环 - 使用 requestAnimationFrame
+        let frameCount = 0;
+        function renderLoop() {
+            if (gameState === 'playing' || gameState === 'countdown') {
+                drawHand(latestHand);
+            } else {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+            
+            updateFPSCounter();
+            requestAnimationFrame(renderLoop);
+        }
+        
+        // 初始化游戏
         async function initGame() {
-            startButton.disabled = true; // Disable button while loading
+            startButton.disabled = true;
             resultElement.textContent = "正在加载摄像头和模型...";
+            
             try {
                 await initCamera();
                 await loadHandposeModel();
                 
                 startButton.addEventListener('click', startGame);
-                startButton.disabled = false; // Enable button after loading
+                startButton.disabled = false;
                 resultElement.textContent = "加载完成。点击开始游戏!";
-                gameState = 'idle'; // Set initial state
+                gameState = 'idle';
                 
-                // Start the drawing loop (runs continuously)
-                drawLoop(); 
+                // 启动渲染循环
+                lastFrameTime = performance.now();
+                frameCount = 0;
+                renderLoop();
+                
             } catch (err) {
                 console.error("游戏初始化失败:", err);
                 startButton.disabled = true;
                 resultElement.textContent = "游戏初始化失败，请刷新页面重试。";
-                 gameState = 'idle'; // Ensure state is idle on failure
+                gameState = 'idle';
             }
         }
         
-        // Start the initialization process
+        // 启动初始化
         initGame();
     </script>
 </body>
